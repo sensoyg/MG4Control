@@ -22,6 +22,7 @@ class BootReceiver : BroadcastReceiver() {
         val action = intent.action ?: return
         if (action !in BOOT_ACTIONS) return
 
+        com.mg4.control.util.FirmwareInfo.initWithContext(context)
         AppLogger.i(TAG, "onReceive: $action — démarrage MG4ControlService")
 
         // Pas de retry différé ici : startForegroundService revient normalement dans les

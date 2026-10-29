@@ -5,10 +5,18 @@ import android.content.Context
 import androidx.appcompat.app.AppCompatDelegate
 import com.mg4.control.debug.AppLogger
 import com.mg4.control.debug.CrashLogger
+import com.mg4.control.util.FirmwareInfo
 import com.mg4.control.util.LocaleHelper
 import com.mg4.control.util.ThemeHelper
 
 class MG4App : Application() {
+
+    companion object {
+        lateinit var instance: MG4App
+            private set
+        val appContext: Context
+            get() = instance.applicationContext
+    }
 
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(LocaleHelper.applyLocale(base))
@@ -16,6 +24,10 @@ class MG4App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+
+        // ── Initialisation du firmware (pour le service en arrière-plan et l'UI) ──
+        FirmwareInfo.initWithContext(this)
 
         // ── Crash handler global ──────────────────────────────────────────────
         // Intercepte toute exception non gérée, écrit la stack trace + les logs

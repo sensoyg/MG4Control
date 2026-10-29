@@ -191,6 +191,7 @@ class MG4ControlService : Service() {
     override fun onCreate() {
         super.onCreate()
         AppLogger.i(TAG, "onCreate")
+        FirmwareInfo.initWithContext(applicationContext)
         // AVANT startForeground : la notification annonce le Mode Garage, elle doit donc être
         // construite après que l'ancien réglage a été repris.
         GarageMode.migrateIfNeeded(applicationContext)
@@ -1354,9 +1355,11 @@ class MG4ControlService : Service() {
             when (state) {
                 MG4Hardware.CarIgnitionItem.RUN -> {
                     AppLogger.i(TAG, "Katman5 IGNITION_RUN → application du profil")
+                    ClusterModuleOverlay.verifierEtRecoller("Katman5 IGNITION_RUN")
                     Handler(Looper.getMainLooper()).postDelayed({
                         applyDefaultProfileOnIgnition()
                         tryClimateAutomation("IGNITION_RUN")
+                        ClusterModuleOverlay.verifierEtRecoller("Katman5 IGNITION_RUN (+500ms)")
                     }, 500L)
                 }
                 MG4Hardware.CarIgnitionItem.OFF -> {

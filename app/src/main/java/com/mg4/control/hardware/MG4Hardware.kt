@@ -349,6 +349,7 @@ object MG4Hardware {
         if (sInitialized) return
         sInitialized = true
         sAppContext = context.applicationContext
+        FirmwareInfo.initWithContext(context)
         AppLogger.i(TAG, "=== MG4Hardware.init() === uid=${android.os.Process.myUid()} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.DEVICE}")
         bindCarService(context)
         sVehicleBinder = getBinderService("vehiclesetting")
@@ -558,6 +559,21 @@ object MG4Hardware {
             vpmClass = launcherCtx.classLoader
                 .loadClass("com.saicmotor.sdk.vehiclesettings.manager.VehiclePropertyManager")
         } catch (e: Exception) {
+            // Sécurité firmwares distributeurs / hybrides : si VehiclePropertyManager n'existe pas,
+            // mais que VehicleSettingManager (VSM_CLASS) est présent dans ce launcher,
+            // la plateforme est en réalité une variante SWI68/DBI68.
+            try {
+                val launcherCtxFallback = context.createPackageContext(
+                    LAUNCHER68_PKG,
+                    android.content.Context.CONTEXT_INCLUDE_CODE or android.content.Context.CONTEXT_IGNORE_SECURITY
+                )
+                launcherCtxFallback.classLoader.loadClass(VSM_CLASS)
+                AppLogger.w(TAG, "  Katman4: VehiclePropertyManager absent mais $VSM_CLASS trouvé dans le launcher " +
+                    "(plateforme SWI68/DBI68 détectée) → bascule automatique vers initKatman4Swi68")
+                initKatman4Swi68(context)
+                return
+            } catch (_: Exception) {}
+
             AppLogger.w(TAG, "  Katman4: package/class error: ${e.message} — will retry")
             Handler(Looper.getMainLooper()).postDelayed({ initKatman4(context.applicationContext) }, 5_000)
             return

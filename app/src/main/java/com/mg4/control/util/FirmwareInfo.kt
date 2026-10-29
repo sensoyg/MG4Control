@@ -25,33 +25,64 @@ object FirmwareInfo {
 
     @Volatile private var cached:         Gen?    = null
     @Volatile private var detectedString: String? = null
+    @Volatile private var sContext:       Context? = null
 
     /**
-     * À appeler en premier dans MainActivity.onCreate(), avant toute inflation de fragment.
-     * Lit le choix forcé éventuel depuis les SharedPreferences et l'applique au cache.
+     * À appeler au plus tôt dans MG4App.onCreate(), MG4ControlService.onCreate()
+     * et MainActivity.onCreate(). Lit le choix forcé éventuel depuis les
+     * SharedPreferences et l'applique au cache.
      */
     fun initWithContext(context: Context) {
-        val forced = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val app = context.applicationContext
+        sContext = app
+        val forced = app.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getString(PREF_FORCED_GEN, null) ?: return
         cached = runCatching { Gen.valueOf(forced) }.getOrDefault(Gen.UNKNOWN)
     }
 
+    /**
+     * Analyse la chaîne de version du firmware et détermine la génération correspondante.
+     * Prend en compte les préfixes standard (SWI), distributeurs (ex: DBI pour la Turquie / Doğan Trend),
+     * ainsi que les variantes régionales à 3 lettres.
+     */
+    fun parseGeneration(rawVersion: String?): Gen {
+        val v = rawVersion?.trim()?.uppercase() ?: return Gen.UNKNOWN
+        return when {
+            v.startsWith("SWI165") || v.startsWith("DBI165") -> Gen.SWI165
+            v.startsWith("SWI133") || v.startsWith("DBI133") -> Gen.SWI133
+            v.startsWith("SWI132") || v.startsWith("DBI132") -> Gen.SWI132   // avant SWI131 — startsWith("SWI13") serait ambigu
+            v.startsWith("SWI131") || v.startsWith("DBI131") -> Gen.SWI131
+            v.startsWith("SWI68")  || v.startsWith("DBI68")  -> Gen.SWI68
+            v.startsWith("SWI69")  || v.startsWith("DBI69")  -> Gen.SWI69
+            Regex("""^(?:[A-Z]{2,4})?165\b""").containsMatchIn(v) -> Gen.SWI165
+            Regex("""^(?:[A-Z]{2,4})?133\b""").containsMatchIn(v) -> Gen.SWI133
+            Regex("""^(?:[A-Z]{2,4})?132\b""").containsMatchIn(v) -> Gen.SWI132
+            Regex("""^(?:[A-Z]{2,4})?131\b""").containsMatchIn(v) -> Gen.SWI131
+            Regex("""^(?:[A-Z]{2,4})?68\b""").containsMatchIn(v)  -> Gen.SWI68
+            Regex("""^(?:[A-Z]{2,4})?69\b""").containsMatchIn(v)  -> Gen.SWI69
+            else -> Gen.UNKNOWN
+        }
+    }
+
     /** Retourne la génération active (forcée ou détectée automatiquement). */
-    fun getGeneration(): Gen {
+    fun getGeneration(context: Context? = null): Gen {
         cached?.let { return it }
+        val ctx = context?.applicationContext ?: sContext
+        if (ctx != null) {
+            val forced = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_FORCED_GEN, null)
+            if (forced != null) {
+                val forcedGen = runCatching { Gen.valueOf(forced) }.getOrDefault(Gen.UNKNOWN)
+                if (forcedGen != Gen.UNKNOWN) {
+                    cached = forcedGen
+                    return forcedGen
+                }
+            }
+        }
         val version = readProp("ro.build.mt2712.version")
             ?: readProp("ro.build.version.incremental")
         detectedString = version
-        val gen = when {
-            version == null               -> Gen.UNKNOWN
-            version.startsWith("SWI165")  -> Gen.SWI165
-            version.startsWith("SWI133")  -> Gen.SWI133
-            version.startsWith("SWI132")  -> Gen.SWI132   // avant SWI131 — startsWith("SWI13") serait ambigu
-            version.startsWith("SWI131")  -> Gen.SWI131
-            version.startsWith("SWI68")   -> Gen.SWI68
-            version.startsWith("SWI69")   -> Gen.SWI69
-            else                          -> Gen.UNKNOWN
-        }
+        val gen = parseGeneration(version)
         cached = gen
         return gen
     }
@@ -71,8 +102,17 @@ object FirmwareInfo {
      */
     fun forceGeneration(context: Context, gen: Gen) {
         cached = gen
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val app = context.applicationContext
+        sContext = app
+        app.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit().putString(PREF_FORCED_GEN, gen.name).apply()
+    }
+
+    /** Utile pour les tests unitaires pour réinitialiser le cache. */
+    fun resetCacheForTests() {
+        cached = null
+        detectedString = null
+        sContext = null
     }
 
     /**

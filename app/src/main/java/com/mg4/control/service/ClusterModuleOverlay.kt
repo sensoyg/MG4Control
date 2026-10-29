@@ -145,6 +145,9 @@ internal object ClusterModuleOverlay {
      * en READY au démarrage, l'affichage vient de remettre le trajet à zéro.
      */
     private val readyListener = ReadyWatcher.Listener { ready, firstRead ->
+        if (ready) main.post {
+            verifierEtRecoller("passage en READY")
+        }
         if (ready && !firstRead) lecteur.post {
             trajet.reset()
             AppLogger.i(TAG, "passage en READY : moyenne et récupération repartent de zéro")
@@ -156,15 +159,30 @@ internal object ClusterModuleOverlay {
     /**
      * Au démarrage du boîtier, l'écran du combiné peut n'apparaître qu'après le service : le module
      * s'y pose dès qu'il arrive. S'il disparaît, la fenêtre part avec lui.
+     * En cas de modification d'affichage (sortie de veille / suspension), la fenêtre est vérifiée et recollée.
      */
     private val ecouteurEcrans = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {
-            if (vue == null) afficher("écran $displayId ajouté", signalerAbsence = false)
+            main.post {
+                if (vue == null || vue?.isAttachedToWindow != true) {
+                    afficher("écran $displayId ajouté", signalerAbsence = false)
+                }
+            }
         }
         override fun onDisplayRemoved(displayId: Int) {
-            if (displayId == ecranId) masquer("écran $displayId retiré")
+            main.post {
+                if (displayId == ecranId) masquer("écran $displayId retiré")
+            }
         }
-        override fun onDisplayChanged(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            main.post {
+                val ctx = appContext ?: return@post
+                val ecran = ecranDuCombine(ctx)
+                if (ecran != null && ecran.displayId == displayId) {
+                    verifierEtRecoller("écran $displayId modifié (state=${ecran.state})")
+                }
+            }
+        }
     }
 
     /** Au démarrage du service ([origine] le dit) et à chaque changement du réglage. */
@@ -236,16 +254,69 @@ internal object ClusterModuleOverlay {
     // ── Fenêtre (fil principal) ──────────────────────────────────────────────
 
     /**
-     * Sans effet si le module est déjà là. [signalerAbsence] : faux pour les essais déclenchés par
-     * l'arrivée d'un écran quelconque, qui ne sont pas tous celui du combiné.
+     * Vérifie si la fenêtre est toujours bien posée sur l'écran du combiné et l'y recolle si besoin.
+     * Appelé lors des transitions de cycle de vie : allumage (IGNITION_RUN), passage en READY,
+     * réveil d'écran après veille (onDisplayChanged), ou rattrapage au boot.
+     */
+    fun verifierEtRecoller(origine: String) {
+        val app = appContext ?: return
+        main.post {
+            if (!ClusterModuleSettings.isEnabled(app) || !ClusterModuleSettings.isSupported()) {
+                return@post
+            }
+            val ecran = ecranDuCombine(app)
+            if (ecran == null) {
+                planifierNouvelEssai(origine)
+                return@post
+            }
+            val v = vue
+            if (v == null || !v.isAttachedToWindow || ecranId != ecran.displayId) {
+                AppLogger.i(TAG, "$origine : fenêtre absente ou détachée sur l'écran ${ecran.displayId} — réaffichage")
+                masquer(origine)
+                afficher(origine, signalerAbsence = false)
+            } else {
+                runCatching {
+                    fenetres?.updateViewLayout(v, v.layoutParams)
+                    v.requestLayout()
+                    v.invalidate()
+                }
+            }
+        }
+    }
+
+    private fun planifierNouvelEssai(origine: String) {
+        val h = main
+        listOf(1_000L, 2_500L, 5_000L, 10_000L).forEach { delai ->
+            h.postDelayed({
+                val app = appContext ?: return@postDelayed
+                if ((vue == null || vue?.isAttachedToWindow != true) && abonne &&
+                    ClusterModuleSettings.isEnabled(app) && ClusterModuleSettings.isSupported()
+                ) {
+                    afficher("$origine (retry @${delai}ms)", signalerAbsence = false)
+                }
+            }, delai)
+        }
+    }
+
+    /**
+     * Sans effet si le module est déjà là et attaché. [signalerAbsence] : faux pour les essais
+     * déclenchés par l'arrivée d'un écran quelconque ou les retries programmés.
      */
     private fun afficher(origine: String, signalerAbsence: Boolean = true) {
         val ctx = appContext ?: return
-        if (vue != null) return
         val ecran = ecranDuCombine(ctx)
+        val vActuelle = vue
+        if (vActuelle != null && vActuelle.isAttachedToWindow && ecranId == ecran?.displayId) {
+            return
+        }
+        if (vActuelle != null && (!vActuelle.isAttachedToWindow || ecranId != ecran?.displayId)) {
+            AppLogger.w(TAG, "$origine : fenêtre orpheline ou écran changé — recréation propre")
+            masquer("$origine (orpheline)")
+        }
         if (ecran == null) {
             if (signalerAbsence) AppLogger.w(TAG, "$origine : aucun écran de combiné parmi ceux d'Android — " +
                 "module non affiché, en attente de son arrivée")
+            planifierNouvelEssai(origine)
             return
         }
         val taille = Point().also { ecran.getRealSize(it) }
@@ -419,7 +490,13 @@ internal object ClusterModuleOverlay {
                 )
             }
             main.post {
-                val v = vue ?: return@post
+                val v = vue
+                if (v == null || !v.isAttachedToWindow) {
+                    if (ClusterModuleSettings.isEnabled(ctx) && ClusterModuleSettings.isSupported()) {
+                        verifierEtRecoller("tic lecteur sans vue")
+                    }
+                    return@post
+                }
                 if (contenu == null) {
                     // Transparente : la page d'origine de l'onglet reparaît dessous.
                     v.visibility = View.INVISIBLE
