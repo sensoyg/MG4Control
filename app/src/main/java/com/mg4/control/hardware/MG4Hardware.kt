@@ -18,6 +18,7 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import java.util.concurrent.ConcurrentHashMap
 import java.lang.reflect.InvocationHandler
+import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import com.mg4.control.debug.AppLogger
 import com.mg4.control.model.AirFlow
@@ -942,43 +943,66 @@ object MG4Hardware {
 
     private fun tryInitSmartSoundManager(launcherCtx: Context, appCtx: Context) {
         if (sSmartSound != null) return
-        try {
-            val cls = launcherCtx.classLoader.loadClass(SMART_SOUND_MANAGER_CLASS)
-
-            // Tentative 1 : singleton déjà initialisé
-            val f = cls.getDeclaredField("sInstance")
-            f.isAccessible = true
-            f.get(null)?.let {
-                sSmartSound = it
-                AppLogger.i(TAG, "  SmartSoundManager singleton ✓")
-                return
-            }
-
-            // Tentative 2 : init(Context, ISettingsServiceListener) — proxy dynamique
-            val initMethod = cls.methods.firstOrNull { m ->
-                m.name == "init" && m.parameterCount == 2 &&
-                Context::class.java.isAssignableFrom(m.parameterTypes[0])
-            } ?: run {
-                AppLogger.w(TAG, "  SmartSoundManager init() non trouvé")
-                return
-            }
-            val listenerType = initMethod.parameterTypes[1]
-            val listener = if (listenerType.isInterface) {
-                java.lang.reflect.Proxy.newProxyInstance(listenerType.classLoader, arrayOf(listenerType)) { _, method, _ ->
-                    if (method.name == "onServiceConnected") {
-                        try {
-                            f.get(null)?.let { sSmartSound = it }
-                            AppLogger.i(TAG, "  SmartSoundManager onServiceConnected — sSmartSound=${if (sSmartSound != null) "OK ✓" else "null"}")
-                        } catch (_: Exception) {}
-                    }
-                    null
+        val classCandidates = listOf(
+            SMART_SOUND_MANAGER_CLASS,
+            "com.saicmotor.sdk.systemsettings.manager.SmartSoundManager",
+            "com.saicmotor.sdk.vehiclesettings.manager.SmartSoundManager",
+            "com.saicmotor.sdk.vehiclesettings.SmartSoundManager",
+            "com.saicmotor.sdk.sound.SmartSoundManager",
+            "com.saicmotor.sdk.sound.manager.SmartSoundManager"
+        )
+        for (className in classCandidates) {
+            try {
+                val cls = try {
+                    launcherCtx.classLoader.loadClass(className)
+                } catch (_: ClassNotFoundException) {
+                    continue
                 }
-            } else null
-            initMethod.invoke(null, appCtx, listener)
-            f.get(null)?.let { sSmartSound = it }
-            AppLogger.i(TAG, "  SmartSoundManager.init() called — sSmartSound=${if (sSmartSound != null) "OK ✓" else "null"}")
-        } catch (e: Exception) {
-            AppLogger.d(TAG, "  tryInitSmartSoundManager exc: ${e.message}")
+
+                // Tentative 1 : singleton déjà initialisé (sInstance, sSmartSoundManager, etc.)
+                val f = try {
+                    cls.getDeclaredField("sInstance")
+                } catch (_: NoSuchFieldException) {
+                    cls.declaredFields.firstOrNull { field ->
+                        Modifier.isStatic(field.modifiers) && cls.isAssignableFrom(field.type)
+                    }
+                }
+                f?.isAccessible = true
+                f?.get(null)?.let {
+                    sSmartSound = it
+                    AppLogger.i(TAG, "  SmartSoundManager ($className) singleton ✓")
+                    return
+                }
+
+                // Tentative 2 : init(Context, ISettingsServiceListener) — proxy dynamique
+                val initMethod = cls.methods.firstOrNull { m ->
+                    m.name == "init" && m.parameterCount == 2 &&
+                    Context::class.java.isAssignableFrom(m.parameterTypes[0])
+                } ?: run {
+                    AppLogger.w(TAG, "  SmartSoundManager ($className) init() non trouvé")
+                    return@run null
+                }
+                if (initMethod == null) continue
+
+                val listenerType = initMethod.parameterTypes[1]
+                val listener = if (listenerType.isInterface) {
+                    java.lang.reflect.Proxy.newProxyInstance(listenerType.classLoader, arrayOf(listenerType)) { _, method, _ ->
+                        if (method.name == "onServiceConnected") {
+                            try {
+                                f?.get(null)?.let { sSmartSound = it }
+                                AppLogger.i(TAG, "  SmartSoundManager onServiceConnected — sSmartSound=${if (sSmartSound != null) "OK ✓" else "null"}")
+                            } catch (_: Exception) {}
+                        }
+                        null
+                    }
+                } else null
+                initMethod.invoke(null, appCtx, listener)
+                f?.get(null)?.let { sSmartSound = it }
+                AppLogger.i(TAG, "  SmartSoundManager.init() called ($className) — sSmartSound=${if (sSmartSound != null) "OK ✓" else "null"}")
+                if (sSmartSound != null) return
+            } catch (e: Exception) {
+                AppLogger.d(TAG, "  tryInitSmartSoundManager ($className) exc: ${e.message}")
+            }
         }
     }
 
@@ -1189,6 +1213,7 @@ object MG4Hardware {
                 if (sVcontrol == null) tryInitVehicleControlManager(launcherCtx, context)
                 if (sGeneral == null) tryInitGeneralManager(launcherCtx, context)
                 if (sSmartSound == null) tryInitSmartSoundManager(launcherCtx, context)
+                if (doorVolumeEnabled() && !sDoorWatcherOn) startDoorVolumeWatcher()
             }, delay)
         }
     }
@@ -4037,35 +4062,219 @@ object MG4Hardware {
 
     /** Max du volume média (borne le slider). -1 si indisponible. */
     fun getMediaVolumeMax(): Int {
-        val v = when {
+        var v = when {
             isOldSdkSound() -> smartSoundGetInt("getMaxVolume", VOL_TYPE_MEDIA)
             isA9Sound()     -> audioGetArg(AUDIO_GET_MAX_VOL, VOL_TYPE_MEDIA)
             else            -> -1
         }
-        AppLogger.i(VOL_TAG, "getMediaVolumeMax = $v  [oldSdk=${isOldSdkSound()} a9=${isA9Sound()} smartSound=${sSmartSound != null} audioHelper=${sAudioHelper != null}]")
+        var source = if (v > 0) (if (isOldSdkSound()) "SAIC oldSdk" else "SAIC A9") else null
+
+        if (v <= 0) {
+            val carMax = carAudioGet("getGroupMaxVolume")
+            if (carMax > 0) {
+                v = carMax
+                source = "CarAudioManager"
+            }
+        }
+        if (v <= 0) {
+            val amMax = androidAudioGetMax()
+            if (amMax > 0) {
+                v = amMax
+                source = "AudioManager"
+            }
+        }
+
+        AppLogger.i(VOL_TAG, "getMediaVolumeMax = $v via ${source ?: "aucun"} [oldSdk=${isOldSdkSound()} a9=${isA9Sound()} smartSound=${sSmartSound != null} audioHelper=${sAudioHelper != null}]")
         return v
     }
 
     /** Volume média courant. -1 si indisponible. */
     fun getMediaVolume(): Int {
-        val v = when {
+        var v = when {
             isOldSdkSound() -> smartSoundGetInt("getVolume", VOL_TYPE_MEDIA)
             isA9Sound()     -> audioGetArg(AUDIO_GET_VOLUME, VOL_TYPE_MEDIA)
             else            -> -1
         }
-        AppLogger.i(VOL_TAG, "getMediaVolume = $v")
+        var source = if (v >= 0) (if (isOldSdkSound()) "SAIC oldSdk" else "SAIC A9") else null
+
+        if (v < 0) {
+            val carVol = carAudioGet("getGroupVolume")
+            if (carVol >= 0) {
+                v = carVol
+                source = "CarAudioManager"
+            }
+        }
+        if (v < 0) {
+            val amVol = androidAudioGetVolume()
+            if (amVol >= 0) {
+                v = amVol
+                source = "AudioManager"
+            }
+        }
+
+        AppLogger.i(VOL_TAG, "getMediaVolume = $v via ${source ?: "aucun"}")
         return v
     }
 
     /** Fixe le volume média. setVolume(type, niveau, flags=0). */
     fun setMediaVolume(level: Int): Boolean {
-        val ok = when {
+        var ok = when {
             isOldSdkSound() -> smartSoundSetVolume(level)
             isA9Sound()     -> audioSet3(AUDIO_SET_VOLUME, VOL_TYPE_MEDIA, level, 0)
             else            -> false
         }
-        AppLogger.i(VOL_TAG, "setMediaVolume($level) = $ok")
+        var source = if (ok) (if (isOldSdkSound()) "SAIC oldSdk" else "SAIC A9") else null
+
+        if (!ok) {
+            if (carAudioSet(level)) {
+                ok = true
+                source = "CarAudioManager"
+            }
+        }
+        if (!ok) {
+            if (androidAudioSetVolume(level)) {
+                ok = true
+                source = "AudioManager"
+            }
+        }
+        if (!ok) {
+            val am = sAppContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (am != null) {
+                try {
+                    val current = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val steps = current - level
+                    if (steps > 0) {
+                        repeat(steps) {
+                            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, 0)
+                        }
+                        ok = true
+                        source = "AudioManager.adjustStreamVolume"
+                    } else if (steps < 0) {
+                        repeat(-steps) {
+                            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0)
+                        }
+                        ok = true
+                        source = "AudioManager.adjustStreamVolume"
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(VOL_TAG, "adjustStreamVolume fallback exc: ${e.message}")
+                }
+            }
+        }
+
+        AppLogger.i(VOL_TAG, "setMediaVolume($level) = $ok via ${source ?: "échec"}")
         return ok
+    }
+
+    // ── Fallbacks audio : CarAudioManager (AAOS Car API) & AudioManager (Android standard) ──
+
+    private fun getCarAudioManager(): Any? {
+        val car = sCar ?: return null
+        return try {
+            car.javaClass.getMethod("getCarManager", String::class.java).invoke(car, "audio")
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun carAudioGet(methodName: String): Int {
+        val cam = getCarAudioManager() ?: return -1
+        return try {
+            var groupId = 0
+            try {
+                val mGroup = cam.javaClass.getMethod("getVolumeGroupIdForUsage", Int::class.javaPrimitiveType)
+                groupId = (mGroup.invoke(cam, 1 /* USAGE_MEDIA */) as? Number)?.toInt() ?: 0
+            } catch (_: Exception) {}
+
+            val m1 = cam.javaClass.methods.firstOrNull {
+                it.name == methodName && it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType
+            }
+            if (m1 != null) {
+                return (m1.invoke(cam, groupId) as? Number)?.toInt() ?: -1
+            }
+            val m2 = cam.javaClass.methods.firstOrNull {
+                it.name == methodName && it.parameterTypes.size == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Int::class.javaPrimitiveType
+            }
+            if (m2 != null) {
+                return (m2.invoke(cam, 0 /* PRIMARY_AUDIO_ZONE */, groupId) as? Number)?.toInt() ?: -1
+            }
+            -1
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    private fun carAudioSet(level: Int): Boolean {
+        val cam = getCarAudioManager() ?: return false
+        return try {
+            var groupId = 0
+            try {
+                val mGroup = cam.javaClass.getMethod("getVolumeGroupIdForUsage", Int::class.javaPrimitiveType)
+                groupId = (mGroup.invoke(cam, 1 /* USAGE_MEDIA */) as? Number)?.toInt() ?: 0
+            } catch (_: Exception) {}
+
+            val m1 = cam.javaClass.methods.firstOrNull {
+                it.name == "setGroupVolume" && it.parameterTypes.size == 3 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[2] == Int::class.javaPrimitiveType
+            }
+            if (m1 != null) {
+                m1.invoke(cam, groupId, level, 0)
+                return true
+            }
+            val m2 = cam.javaClass.methods.firstOrNull {
+                it.name == "setGroupVolume" && it.parameterTypes.size == 4 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[2] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[3] == Int::class.javaPrimitiveType
+            }
+            if (m2 != null) {
+                m2.invoke(cam, 0 /* PRIMARY_AUDIO_ZONE */, groupId, level, 0)
+                return true
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun androidAudioGetMax(): Int {
+        val am = sAppContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return -1
+        return try {
+            am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    private fun androidAudioGetVolume(): Int {
+        val am = sAppContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return -1
+        return try {
+            am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    private fun androidAudioSetVolume(level: Int): Boolean {
+        val am = sAppContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        return try {
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val min = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                try { am.getStreamMinVolume(AudioManager.STREAM_MUSIC) } catch (_: Exception) { 0 }
+            } else 0
+            val target = level.coerceIn(min, if (max > 0) max else 30)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            true
+        } catch (e: Exception) {
+            AppLogger.w(VOL_TAG, "androidAudioSetVolume exc: ${e.message}")
+            false
+        }
     }
 
     // old-SDK : SmartSoundManager (reflection)
@@ -5444,12 +5653,13 @@ object MG4Hardware {
     }
 
     /**
-     * Baisse du volume en quittant la voiture : partout où le volume média est pilotable (ancien SDK
-     * et A9). Déclencheur : la porte là où elle est lisible ([hasDoorDetection]), sinon la sortie du
-     * mode READY en P ([ReadyWatcher]), qui correspond sur MG4 à l'ouverture de la porte conducteur
-     * ceinture détachée.
+     * Baisse du volume en quittant la voiture : partout où le volume média est pilotable (ancien SDK,
+     * A9, ou fallback AudioManager). Déclencheur : la porte là où elle est lisible ([hasDoorDetection]),
+     * sinon la sortie du mode READY en P ([ReadyWatcher]), qui correspond sur MG4 à l'ouverture de la porte
+     * conducteur ceinture détachée.
      */
-    fun hasDoorVolumeFeature(): Boolean = isOldSdkSound() || isA9Sound()
+    fun hasDoorVolumeFeature(): Boolean =
+        isOldSdkSound() || isA9Sound() || sAppContext?.getSystemService(Context.AUDIO_SERVICE) != null
 
     private fun doorVolumeEnabled(): Boolean {
         // Mode Garage : une portière qui fait chuter le volume est exactement le genre de
@@ -5521,6 +5731,10 @@ object MG4Hardware {
         val level = doorVolumeLevel()
         CoroutineScope(Dispatchers.IO).launch {
             val before = getMediaVolume()
+            if (before in 0..level) {
+                AppLogger.i(DOORWATCH_TAG, "$origin → volume actuel ($before) <= niveau cible ($level) — aucune baisse")
+                return@launch
+            }
             sVolumeBeforeDrop = before
             if (before >= 0) sAppContext?.getSharedPreferences("mg4_settings", 0)?.edit()
                 ?.putInt(KEY_VOLUME_BEFORE_DROP, before)?.apply()

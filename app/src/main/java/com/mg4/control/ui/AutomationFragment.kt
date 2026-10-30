@@ -183,9 +183,15 @@ class AutomationFragment : Fragment() {
             val max = MG4Hardware.getMediaVolumeMax()
             withContext(Dispatchers.Main) {
                 if (!isAdded) return@withContext
-                if (max > 0) slider.valueTo = max.toFloat()
-                val level = prefs.getInt("door_volume_level", 0)
-                slider.value = level.coerceIn(0, slider.valueTo.toInt()).toFloat()
+                if (max > 0) {
+                    val level = prefs.getInt("door_volume_level", 0).coerceIn(0, max)
+                    if (slider.value > max) slider.value = max.toFloat()
+                    slider.valueTo = max.toFloat()
+                    slider.value = level.toFloat()
+                } else {
+                    val level = prefs.getInt("door_volume_level", 0)
+                    slider.value = level.coerceIn(0, slider.valueTo.toInt()).toFloat()
+                }
                 afficher(slider.value.toInt())
             }
         }
