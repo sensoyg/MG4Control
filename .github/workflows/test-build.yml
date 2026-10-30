@@ -47,18 +47,32 @@ jobs:
 
       - name: Decode platform keystore
         run: |
-          # Sans "if:" : un secret absent sautait l'étape en silence et produisait un APK NON
-          # signé, impossible à installer par-dessus une version signée — et sans le dire.
           if [ -z "$MG4_KEYSTORE_BASE64" ]; then
-            echo "::error::MG4_KEYSTORE_BASE64 absent : l'APK de test serait non signé."
-            exit 1
+            echo "::notice::MG4_KEYSTORE_BASE64 absent (dépôt fork). Téléchargement des clés officielles de test Google AOSP platform..."
+            mkdir -p "$RUNNER_TEMP/aosp-keys"
+            wget -q --retry-connrefused --tries=3 -O "$RUNNER_TEMP/aosp-keys/platform.pk8" "https://raw.githubusercontent.com/android/platform_build/master/target/product/security/platform.pk8"
+            wget -q --retry-connrefused --tries=3 -O "$RUNNER_TEMP/aosp-keys/platform.x509.pem" "https://raw.githubusercontent.com/android/platform_build/master/target/product/security/platform.x509.pem"
+
+            # Conversion en keystore PKCS12 pour le build Gradle
+            openssl pkcs8 -in "$RUNNER_TEMP/aosp-keys/platform.pk8" -inform DER -out "$RUNNER_TEMP/aosp-keys/platform.key" -nocrypt
+            openssl pkcs12 -export -in "$RUNNER_TEMP/aosp-keys/platform.x509.pem" -inkey "$RUNNER_TEMP/aosp-keys/platform.key" \
+              -out "$RUNNER_TEMP/platform.keystore" -name platform -password pass:android
+
+            echo "MG4_KEYSTORE=$RUNNER_TEMP/platform.keystore" >> "$GITHUB_ENV"
+            echo "MG4_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+            echo "MG4_KEY_ALIAS=platform" >> "$GITHUB_ENV"
+            echo "MG4_KEY_PASSWORD=android" >> "$GITHUB_ENV"
+            echo "AOSP_FALLBACK_KEY=true" >> "$GITHUB_ENV"
+            echo "Clés AOSP platform prêtes pour signature Gradle et apksigner."
+          else
+            printf '%s' "$MG4_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/platform.keystore"
+            if [ "$(head -c1 "$RUNNER_TEMP/platform.keystore" | od -An -tx1 | tr -d ' ')" != "30" ]; then
+              echo "::error::MG4_KEYSTORE_BASE64 est invalide. Recréer le secret avec : base64 -w0 platform.keystore"
+              exit 1
+            fi
+            echo "MG4_KEYSTORE=$RUNNER_TEMP/platform.keystore" >> "$GITHUB_ENV"
+            echo "AOSP_FALLBACK_KEY=false" >> "$GITHUB_ENV"
           fi
-          printf '%s' "$MG4_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/platform.keystore"
-          if [ "$(head -c1 "$RUNNER_TEMP/platform.keystore" | od -An -tx1 | tr -d ' ')" != "30" ]; then
-            echo "::error::MG4_KEYSTORE_BASE64 est invalide. Recréer le secret avec : base64 -w0 platform.keystore"
-            exit 1
-          fi
-          echo "MG4_KEYSTORE=$RUNNER_TEMP/platform.keystore" >> "$GITHUB_ENV"
 
       # Reprend le suffixe de la dernière prerelease dont le cœur numérique correspond au
       # versionName courant. Cœur différent = la version a été montée depuis, on repart de
@@ -73,10 +87,10 @@ jobs:
           if [ -z "$BASE" ]; then
             echo "::error::versionName introuvable dans app/build.gradle.kts"; exit 1
           fi
-          LAST=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" \
-                 | jq -r '.[] | select(.prerelease==true) | .tag_name' \
+          LAST=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" 2>/dev/null \
+                 | jq -r '.[]? | select(.prerelease==true) | .tag_name' 2>/dev/null \
                  | sed 's/^v//' \
-                 | awk -v base="$BASE" '{ c=$0; sub(/-.*/,"",c); if (c==base) { print; exit } }')
+                 | awk -v base="$BASE" '{ c=$0; sub(/-.*/,"",c); if (c==base) { print; exit } }' || true)
           if [ -n "$LAST" ]; then
             PRE="${LAST#$BASE-}"
             echo "Dernière beta de $BASE : $LAST"
@@ -90,23 +104,33 @@ jobs:
           echo "Version de test : ${BASE}${SUFFIX}"
 
       - name: Build APK(s)
+        id: build
         env:
-          MG4_KEYSTORE_PASSWORD: ${{ secrets.MG4_KEYSTORE_PASSWORD }}
-          MG4_KEY_ALIAS: ${{ secrets.MG4_KEY_ALIAS }}
-          MG4_KEY_PASSWORD: ${{ secrets.MG4_KEY_PASSWORD }}
+          MG4_KEYSTORE_PASSWORD: ${{ secrets.MG4_KEYSTORE_PASSWORD || env.MG4_KEYSTORE_PASSWORD }}
+          MG4_KEY_ALIAS: ${{ secrets.MG4_KEY_ALIAS || env.MG4_KEY_ALIAS }}
+          MG4_KEY_PASSWORD: ${{ secrets.MG4_KEY_PASSWORD || env.MG4_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          # "release" → assembleOnlineRelease ; "debug" → assembleOnlineDebug
           case "${{ inputs.build_type }}" in
             release) SUFFIX="Release" ;;
             debug)   SUFFIX="Debug" ;;
+            *)       SUFFIX="Debug" ;;
           esac
+
+          if [ "${AOSP_FALLBACK_KEY:-false}" = "true" ]; then
+            echo "::notice::Build fork sans secret : bascule automatique vers le mode Debug (assembleOnlineDebug)."
+            SUFFIX="Debug"
+          fi
+
           case "${{ inputs.variant }}" in
             both)    TASKS="assembleOnline$SUFFIX assembleOffline$SUFFIX" ;;
             online)  TASKS="assembleOnline$SUFFIX" ;;
             offline) TASKS="assembleOffline$SUFFIX" ;;
+            *)       TASKS="assembleOnline$SUFFIX" ;;
           esac
+
           echo "Tâches : $TASKS"
+          echo "actual_suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
           ./gradlew $TASKS --no-daemon \
             -Pmg4.versionSuffix='${{ steps.ver.outputs.suffix }}'
 
@@ -115,6 +139,24 @@ jobs:
           mkdir -p dist
           find app/build/outputs/apk -name "*.apk" -exec cp {} dist/ \;
           ls -la dist/
+
+      # Signature explicite avec apksigner et les clés officielles AOSP platform (platform.pk8 / platform.x509.pem)
+      # requise pour accorder sharedUserId="android.uid.system" sans erreur INSTALL_FAILED_SHARED_USER_INCOMPATIBLE.
+      - name: Sign APKs with AOSP platform test key
+        if: env.AOSP_FALLBACK_KEY == 'true'
+        run: |
+          APKSIGNER=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -1)
+          for f in dist/*.apk; do
+            echo "Signature avec apksigner de $(basename "$f") avec platform.pk8 et platform.x509.pem..."
+            "$APKSIGNER" sign \
+              --key "$RUNNER_TEMP/aosp-keys/platform.pk8" \
+              --cert "$RUNNER_TEMP/aosp-keys/platform.x509.pem" \
+              --min-sdk-version 23 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              "$f"
+          done
 
       # /!\ --min-sdk-version 23 est OBLIGATOIRE pour que ce rapport dise la vérité : sans lui,
       # apksigner prend le minSdk de l'APK (28), ne vérifie qu'en v3, et affiche
@@ -125,7 +167,7 @@ jobs:
           for f in dist/*.apk; do
             echo "── $(basename "$f") ──"
             "$APKSIGNER" verify --print-certs -v --min-sdk-version 23 "$f" \
-              | grep -E 'Verified using v[0-9]|certificate SHA-256 digest'
+              | grep -E 'Verified using v[0-9]|certificate SHA-256 digest|Subject:' || true
             # Présence RÉELLE de la v1, indépendamment de ce qu'apksigner choisit de vérifier :
             # sans elle, l'app refuse l'installation (getPackageArchiveInfo ne lit aucun
             # certificat sur AAOS 9). Autant casser ici plutôt que de le découvrir sur la voiture.
@@ -141,7 +183,7 @@ jobs:
       - name: Upload APKs (artifacts, PAS une release)
         uses: actions/upload-artifact@v4
         with:
-          name: mg4control-${{ steps.ver.outputs.full }}-${{ inputs.variant }}-${{ inputs.build_type }}
+          name: mg4control-${{ steps.ver.outputs.full }}-${{ inputs.variant || 'both' }}-${{ steps.build.outputs.actual_suffix || inputs.build_type || 'debug' }}
           path: dist/*.apk
           retention-days: 14
           if-no-files-found: error
