@@ -2,6 +2,7 @@ package com.mg4.control.ui
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -696,6 +697,11 @@ class SettingsFragment : Fragment() {
             showInfosDialog()
         }
 
+        // ── Bouton Paramètres Android ─────────────────────────────────────────
+        view.findViewById<MaterialButton>(R.id.btn_android_settings)?.setOnClickListener {
+            openAndroidSettings()
+        }
+
         // ── Bouton Fermer ─────────────────────────────────────────────────────
         view.findViewById<MaterialButton>(R.id.btn_close_settings).setOnClickListener {
             findNavController().popBackStack(R.id.dashboardFragment, false)
@@ -973,6 +979,27 @@ class SettingsFragment : Fragment() {
         } catch (e: Exception) {
             Toast.makeText(ctx, getString(R.string.diag_download_failed, e.message ?: "?"), Toast.LENGTH_LONG).show()
         }
+    }
+
+    // ── Ouverture des paramètres système Android ────────────────────────────
+
+    private fun openAndroidSettings() {
+        val ctx = context ?: return
+        val intents = listOf(
+            Intent(android.provider.Settings.ACTION_SETTINGS),
+            Intent().setComponent(ComponentName("com.android.settings", "com.android.settings.Settings")),
+            Intent().setComponent(ComponentName("com.android.car.settings", "com.android.car.settings.Settings_Standard")),
+            Intent().setComponent(ComponentName("com.android.car.settings", "com.android.car.settings.HomepageActivity")),
+            Intent().setComponent(ComponentName("com.android.car.settings", "com.android.car.settings.common.CarSettingActivities")),
+        )
+        for (intent in intents) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                return
+            } catch (_: Exception) {}
+        }
+        Toast.makeText(ctx, R.string.android_settings_open_failed, Toast.LENGTH_SHORT).show()
     }
 
     // ── Dialog À propos ──────────────────────────────────────────────────────

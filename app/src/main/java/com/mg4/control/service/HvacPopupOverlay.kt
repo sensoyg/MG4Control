@@ -142,6 +142,7 @@ object HvacPopupOverlay {
     /** Raccourci : ouvre le popup, ou le referme s'il est déjà à l'écran. */
     fun toggle(context: Context) {
         val app = context.applicationContext
+        FirmwareInfo.initWithContext(context)
         handler.post {
             if (overlayView != null) {
                 AppLogger.i(TAG, "Pop-up HVAC — second appui du raccourci → fermeture")
@@ -152,7 +153,7 @@ object HvacPopupOverlay {
             ouvertureEnCours = true
             vehicule.execute {
                 val lu = lireEtat()
-                val chauds = lireChauffages()
+                val chauds = lireChauffages(app)
                 handler.post {
                     ouvertureEnCours = false
                     // Sans état, il n'y aurait ni valeur à montrer ni base pour « un cran de plus ».
@@ -172,20 +173,24 @@ object HvacPopupOverlay {
 
     /**
      * Même règle que la carte des chauffages du tableau de bord : SWI133, SWI68 et SWI165.
-     * Ailleurs (finitions sans ces équipements, ou firmware sans commande connue) → null.
+     * En cas de doute ou firmware non encore forcé, vérifie si le matériel (CarHvacManager)
+     * répond positivement aux lectures de sièges / volant chauffants.
+     * Ailleurs (finitions sans ces équipements, ex: SWI69/SWI131) → null.
      */
-    private fun lireChauffages(): HvacPopupSkin.Chauffages? {
-        if (!FirmwareInfo.hasHeatFeatures()) return null
-        return try {
-            HvacPopupSkin.Chauffages(
-                siegeGauche = MG4Hardware.getSeatHeatLeftOrNull(),
-                siegeDroit  = MG4Hardware.getSeatHeatRightOrNull(),
-                volant      = MG4Hardware.getSteeringHeatOrNull(),
-            )
-        } catch (e: Exception) {
-            AppLogger.w(TAG, "Pop-up HVAC — lecture chauffages : ${e.message}")
-            HvacPopupSkin.Chauffages(null, null, null)
-        }
+    private fun lireChauffages(context: Context? = null): HvacPopupSkin.Chauffages? {
+        val hasHeatFeature = FirmwareInfo.hasHeatFeatures(context)
+        val siegeGauche = try { MG4Hardware.getSeatHeatLeftOrNull() } catch (_: Exception) { null }
+        val siegeDroit  = try { MG4Hardware.getSeatHeatRightOrNull() } catch (_: Exception) { null }
+        val volant      = try { MG4Hardware.getSteeringHeatOrNull() } catch (_: Exception) { null }
+
+        val hasHardwareResponse = siegeGauche != null || siegeDroit != null || volant != null
+        if (!hasHeatFeature && !hasHardwareResponse) return null
+
+        return HvacPopupSkin.Chauffages(
+            siegeGauche = siegeGauche,
+            siegeDroit  = siegeDroit,
+            volant      = volant,
+        )
     }
 
     private fun showOnMain(context: Context, lu: MG4Hardware.ClimateState, chauds: HvacPopupSkin.Chauffages?) {
@@ -463,7 +468,7 @@ object HvacPopupOverlay {
         if (SystemClock.uptimeMillis() < silenceJusqua) return
         vehicule.execute {
             val lu = lireEtat() ?: return@execute
-            val chauds = lireChauffages()
+            val chauds = lireChauffages(vues?.localized)
             handler.post {
                 if (overlayView != null && ecrituresEnVol == 0 && differees.isEmpty()) {
                     etat = lu

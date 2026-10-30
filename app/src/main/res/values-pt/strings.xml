@@ -199,6 +199,8 @@
     <string name="update_up_to_date">✓  Atualizado</string>
     <string name="update_network_error">✕  Erro de rede</string>
     <string name="btn_infos">Info</string>
+    <string name="btn_android_settings">Definições do Android</string>
+    <string name="android_settings_open_failed">Não foi possível abrir as definições do Android</string>
     <string name="info_title">Sobre</string>
     <string name="info_version_label">Versão</string>
     <string name="info_firmware_label">Firmware</string>

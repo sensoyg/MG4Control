@@ -35,9 +35,16 @@ object FirmwareInfo {
     fun initWithContext(context: Context) {
         val app = context.applicationContext
         sContext = app
-        val forced = app.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getString(PREF_FORCED_GEN, null) ?: return
-        cached = runCatching { Gen.valueOf(forced) }.getOrDefault(Gen.UNKNOWN)
+        val prefs = runCatching {
+            val storageCtx = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N &&
+                context.isDeviceProtectedStorage) context else app
+            storageCtx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        }.getOrNull() ?: return
+        val forced = prefs.getString(PREF_FORCED_GEN, null) ?: return
+        val forcedGen = runCatching { Gen.valueOf(forced) }.getOrDefault(Gen.UNKNOWN)
+        if (forcedGen != Gen.UNKNOWN) {
+            cached = forcedGen
+        }
     }
 
     /**
@@ -66,11 +73,15 @@ object FirmwareInfo {
 
     /** Retourne la génération active (forcée ou détectée automatiquement). */
     fun getGeneration(context: Context? = null): Gen {
-        cached?.let { return it }
+        cached?.let { if (it != Gen.UNKNOWN) return it }
         val ctx = context?.applicationContext ?: sContext
         if (ctx != null) {
-            val forced = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .getString(PREF_FORCED_GEN, null)
+            val forced = runCatching {
+                val storageCtx = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N &&
+                    ctx.isDeviceProtectedStorage) ctx else ctx.applicationContext
+                storageCtx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .getString(PREF_FORCED_GEN, null)
+            }.getOrNull()
             if (forced != null) {
                 val forcedGen = runCatching { Gen.valueOf(forced) }.getOrDefault(Gen.UNKNOWN)
                 if (forcedGen != Gen.UNKNOWN) {
@@ -79,12 +90,31 @@ object FirmwareInfo {
                 }
             }
         }
-        val version = readProp("ro.build.mt2712.version")
-            ?: readProp("ro.build.version.incremental")
-        detectedString = version
-        val gen = parseGeneration(version)
-        cached = gen
-        return gen
+        val candidates = listOfNotNull(
+            readProp("ro.build.display.id"),
+            runCatching { android.os.Build.DISPLAY }.getOrNull()?.takeIf { it.isNotBlank() },
+            readProp("ro.build.mt2712.version"),
+            readProp("ro.build.version.incremental"),
+            runCatching { android.os.Build.VERSION.INCREMENTAL }.getOrNull()?.takeIf { it.isNotBlank() },
+            readProp("ro.system.build.version.incremental"),
+            readProp("ro.vendor.build.version.incremental"),
+            readProp("ro.product.build.version.incremental"),
+            readProp("ro.build.id"),
+            runCatching { android.os.Build.ID }.getOrNull()?.takeIf { it.isNotBlank() },
+            readProp("ro.build.description")
+        )
+        for (version in candidates) {
+            val gen = parseGeneration(version)
+            if (gen != Gen.UNKNOWN) {
+                detectedString = version
+                cached = gen
+                return gen
+            }
+        }
+        if (detectedString == null) {
+            detectedString = candidates.firstOrNull() ?: "?"
+        }
+        return Gen.UNKNOWN
     }
 
     /**
@@ -156,8 +186,8 @@ object FirmwareInfo {
      * SWI133, SWI68 et SWI165 ont les sièges chauffants et le volant chauffant.
      * SWI69 et SWI131 sont des finitions Standard/SE sans ces équipements.
      */
-    fun hasHeatFeatures(): Boolean {
-        val gen = getGeneration()
+    fun hasHeatFeatures(context: Context? = null): Boolean {
+        val gen = getGeneration(context)
         return gen == Gen.SWI133 || gen == Gen.SWI68 || gen == Gen.SWI165
     }
 

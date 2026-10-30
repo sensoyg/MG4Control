@@ -5,7 +5,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class FirmwareInfoTest {
 
     @Before
@@ -52,6 +57,22 @@ class FirmwareInfoTest {
         assertEquals(FirmwareInfo.Gen.UNKNOWN, FirmwareInfo.parseGeneration(""))
         assertEquals(FirmwareInfo.Gen.UNKNOWN, FirmwareInfo.parseGeneration("UNKNOWN_FW_1234"))
         assertFalse(ClusterModuleSettings.supportedOn(FirmwareInfo.parseGeneration("UNKNOWN_FW_1234")))
+    }
+
+    @Test
+    fun `hasHeatFeatures correctly identifies supported firmwares including DBI68`() {
+        val turkishGen = FirmwareInfo.parseGeneration("DBI68-29558-1X00RXX-20250530")
+        assertEquals(FirmwareInfo.Gen.SWI68, turkishGen)
+
+        // Directly verify with forceGeneration
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        FirmwareInfo.forceGeneration(context, turkishGen)
+        assertTrue("Turkish DBI68 firmware must support heat features (seats and steering wheel)",
+            FirmwareInfo.hasHeatFeatures(context))
+
+        FirmwareInfo.forceGeneration(context, FirmwareInfo.Gen.SWI69)
+        assertFalse("SWI69 standard trim has no heat features",
+            FirmwareInfo.hasHeatFeatures(context))
     }
 }
 

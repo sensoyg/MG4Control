@@ -199,6 +199,8 @@
     <string name="update_up_to_date">✓  Up to date</string>
     <string name="update_network_error">✕  Network error</string>
     <string name="btn_infos">Info</string>
+    <string name="btn_android_settings">Android Settings</string>
+    <string name="android_settings_open_failed">Unable to open Android settings</string>
     <string name="info_title">About</string>
     <string name="info_version_label">Version</string>
     <string name="info_firmware_label">Firmware</string>

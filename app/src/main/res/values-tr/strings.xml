@@ -199,6 +199,8 @@
     <string name="update_up_to_date">✓  Güncel</string>
     <string name="update_network_error">✕  Ağ hatası</string>
     <string name="btn_infos">Bilgi</string>
+    <string name="btn_android_settings">Android Ayarları</string>
+    <string name="android_settings_open_failed">Android ayarları açılamadı</string>
     <string name="info_title">Hakkında</string>
     <string name="info_version_label">Sürüm</string>
     <string name="info_firmware_label">Firmware</string>

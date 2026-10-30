@@ -201,6 +201,8 @@
     <string name="update_up_to_date">✓  Application à jour</string>
     <string name="update_network_error">✕  Erreur réseau</string>
     <string name="btn_infos">Infos</string>
+    <string name="btn_android_settings">Paramètres Android</string>
+    <string name="android_settings_open_failed">Impossible d\'ouvrir les paramètres Android</string>
     <string name="info_title">À propos</string>
     <string name="info_version_label">Version</string>
     <string name="info_firmware_label">Firmware</string>
